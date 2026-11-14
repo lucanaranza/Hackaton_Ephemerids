@@ -1,0 +1,4 @@
+# DEM pesanti: non vanno su GitHub
+dati_dem/
+__pycache__/
+*.pyc
