@@ -32,6 +32,7 @@ senso orario, Luna sferica di raggio 1 737 400 m, frame MOON_ME_DE421.
 Il DEM deve essere in proiezione stereografica polare SUD (prodotti PGDA/LOLA).
 """
 import argparse
+import base64
 import json
 import time
 from datetime import datetime, timedelta, timezone
@@ -260,12 +261,35 @@ def metriche_celle(oriz, lat, lon, quota, sole, terra, passo_min, blocco=48,
     return ris
 
 
+def evoluzione_celle(oriz, lat, lon, quota, sole, terra, blocco=48,
+                     margine_com_deg=MARGINE_COM_DEG):
+    """Per ogni istante e ogni cella: Sole visibile? Terra utile? (array bool
+    [n_tempi, n_celle]). Serve per lo slider temporale dell'app."""
+    nc, nt = len(lat), sole.shape[1]
+    luce = np.zeros((nt, nc), bool)
+    com = np.zeros((nt, nc), bool)
+    for a in range(0, nc, blocco):
+        idx = np.arange(a, min(a + blocco, nc))
+        idx = idx[np.isfinite(quota[idx])]
+        if not len(idx):
+            continue
+        el_s, az_s, _ = elev_az(sole, lat[idx], lon[idx], quota[idx])
+        el_t, az_t, _ = elev_az(terra, lat[idx], lon[idx], quota[idx])
+        luce[:, idx] = (el_s - _interp_orizzonte(oriz[idx], az_s) > 0).T
+        com[:, idx] = (el_t - _interp_orizzonte(oriz[idx], az_t) > margine_com_deg).T
+    return luce, com
+
+
+def _bit_b64(b):
+    return base64.b64encode(np.packbits(b.ravel()).tobytes()).decode("ascii")
+
+
 # --------------------------------------------------------------------------
 # Programma principale
 # --------------------------------------------------------------------------
 def mappa_sito(dem_path=None, far_path=None, nome=None, passo=500.0, inizio=None,
                giorni=365, passo_tempo=60, n_az=360, margine_bordo=0.0,
-               celle_csv=None, punti=None):
+               celle_csv=None, punti=None, passo_evoluzione=360):
     t0 = time.time()
     vicino = DEM.da_celle(celle_csv) if celle_csv else DEM(dem_path)
     sx0, sy0, sx1, sy1 = vicino.bounds
@@ -291,6 +315,21 @@ def mappa_sito(dem_path=None, far_path=None, nome=None, passo=500.0, inizio=None
     tempi, sole, terra = vettori_sole_terra(inizio, giorni, passo_tempo)
     ris = metriche_celle(oriz, lat, lon, quota, sole, terra, passo_tempo)
     print(f"[{nome}] metriche calcolate, totale {time.time() - t0:.0f} s")
+
+    evoluzione = None
+    if passo_evoluzione:
+        tempi_e, sole_e, terra_e = vettori_sole_terra(inizio, giorni, passo_evoluzione)
+        luce_e, com_e = evoluzione_celle(oriz, lat, lon, quota, sole_e, terra_e)
+        evoluzione = {
+            "formato": "evoluzione-sito-lunare", "versione": 1, "nome": nome,
+            "inizio": inizio.strftime('%Y-%m-%dT%H:%M:%SZ'), "passo_min": passo_evoluzione,
+            "n_istanti": len(tempi_e), "forma_griglia": [len(gy), len(gx)],
+            "codifica": ("base64 di bit impacchettati (numpy.packbits, primo bit = bit piu' "
+                         "significativo del byte); 1 = vero. Ordine: istante, riga, colonna. "
+                         "Bit k -> istante k // (righe*colonne), cella k % (righe*colonne)."),
+            "luce": _bit_b64(luce_e), "comunicazione": _bit_b64(com_e),
+        }
+        print(f"[{nome}] evoluzione temporale: {len(tempi_e)} istanti ogni {passo_evoluzione:g} min")
 
     forma = (len(gy), len(gx))
     extra = {}
@@ -335,6 +374,7 @@ def mappa_sito(dem_path=None, far_path=None, nome=None, passo=500.0, inizio=None
         },
         "migliori_celle": migliori,
         "punti_segnati": punti or [],
+        "_evoluzione": evoluzione,
         "_orizzonti": oriz,     # non salvato nel JSON (troppo grande), utile per i controlli
     }
 
@@ -379,6 +419,9 @@ def salva(mappa, cartella):
     p_json = cartella / f"mappa_{nome}.json"
     p_json.write_text(json.dumps(_json_pulito(mappa), separators=(",", ":")), encoding="utf-8")
     disegna(mappa, cartella / f"mappa_{nome}.png")
+    if mappa.get("_evoluzione"):
+        (cartella / f"evoluzione_{nome}.json").write_text(
+            json.dumps(mappa["_evoluzione"], separators=(",", ":")), encoding="utf-8")
     return p_json
 
 
@@ -465,6 +508,8 @@ if __name__ == "__main__":
     ap.add_argument("--giorni", type=float, default=365)
     ap.add_argument("--passo-tempo", type=float, default=60, help="minuti tra due istanti")
     ap.add_argument("--uscita", default="output/mappe")
+    ap.add_argument("--passo-evoluzione", type=float, default=360,
+                    help="minuti tra i fotogrammi per lo slider temporale (0 = non salvare)")
     ap.add_argument("--confronta", help="horizon.json del gruppo Terreno da confrontare")
     ap.add_argument("--segna", action="append", default=[],
                     help='punto da evidenziare: "lat,lon,nome" (ripetibile)')
@@ -482,7 +527,7 @@ if __name__ == "__main__":
 
     inizio = datetime.strptime(a.inizio, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     m = mappa_sito(a.dem, a.far, a.nome, a.passo, inizio, a.giorni, a.passo_tempo,
-                   celle_csv=a.celle, punti=punti)
+                   celle_csv=a.celle, punti=punti, passo_evoluzione=a.passo_evoluzione)
     print("Salvato:", salva(m, a.uscita))
     print("Migliori celle atterrabili (luce + comunicazione):")
     for n, c in enumerate(m["migliori_celle"], 1):
