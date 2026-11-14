@@ -10,13 +10,22 @@ Per ogni cella di una griglia (default 500 m) dentro il DEM di un sito:
     3. ricava le metriche: % luce, energia media, % comunicazione utile,
        % luce + comunicazione, buio continuo piu' lungo.
 
-Uso (dalla cartella del repository):
-    python mappatura.py --dem dati_dem/Site01_final_adj_5mpp_surf.tif \
-                        --far dati_dem/LDEM_60S_240MPP_ADJ.TIF --nome Sito_01
+Uso (dalla cartella del repository), due modi per il terreno vicino:
+    a) celle da 100 m del gruppo Terreno (site_cells.csv) - consigliato:
+       python mappatura.py --celle "<...>/Sito_04/site_cells.csv" \
+              --far dati_dem/LDEM_60S_240MPP_ADJ.tiff --nome Sito_04 --uscita Site04
+    b) DEM a 5 m (*_surf.tif):
+       python mappatura.py --dem Site01/Site01_final_adj_5mpp_surf.tif \
+              --far dati_dem/LDEM_60S_240MPP_ADJ.tiff --nome Sito_01 --uscita Site01
+    Su Connecting ridge i due modi differiscono in media < 1 punto percentuale
+    (correlazione 0.99); il CSV e' leggermente ottimista (media su 100 m).
+    Con il CSV si ottiene anche la pendenza e la classifica delle celle
+    "atterrabili" (>= 50% dell'area con pendenza <= 10 gradi).
 
 Opzioni utili: --passo 500 (m tra le celle), --inizio 2027-01-01,
 --giorni 365, --passo-tempo 60 (minuti), --confronta <horizon.json del
-gruppo Terreno> (verifica l'orizzonte al centro).
+gruppo Terreno> (verifica l'orizzonte al centro), --segna "lat,lon,nome"
+(punto da evidenziare sulla mappa, ripetibile).
 
 Convenzioni identiche a effemeridi.py: angoli in gradi, azimut da Nord in
 senso orario, Luna sferica di raggio 1 737 400 m, frame MOON_ME_DE421.
@@ -40,6 +49,9 @@ from effemeridi import (DEGRADO_POLVERE_ANNUO_PCT, MARGINE_COM_DEG,
 
 R_LUNA_M = 1_737_400.0
 LUNA_LONLAT = f"+proj=longlat +R={R_LUNA_M} +no_defs"
+CRS_POLARE = (f"+proj=stere +lat_0=-90 +lat_ts=-90 +lon_0=0 +x_0=0 +y_0=0 "
+              f"+R={R_LUNA_M} +units=m +no_defs")
+PENDENZA_MAX_DEG = 10.0        # soglia di atterrabilita' (stessa del gruppo Terreno)
 
 
 # --------------------------------------------------------------------------
@@ -48,7 +60,15 @@ LUNA_LONLAT = f"+proj=longlat +R={R_LUNA_M} +no_defs"
 class DEM:
     """DEM in stereografica polare sud, letto (eventualmente) solo in una finestra."""
 
-    def __init__(self, path, bounds=None):
+    def __init__(self, path=None, bounds=None, z=None, transform=None, crs=None):
+        if z is not None:                       # DEM gia' in memoria (es. da CSV)
+            self.z, self.transform, self.crs = z, transform, crs
+            self.res = abs(transform.a)
+            self.bounds = rasterio.transform.array_bounds(*z.shape, transform)  # (ovest, sud, est, nord)
+            self._inv = ~self.transform
+            self.celle = None
+            return
+        self.celle = None
         with rasterio.open(path) as src:
             window = None
             if bounds is not None:
@@ -58,9 +78,28 @@ class DEM:
             self.z = data * src.scales[0] + src.offsets[0]
             self.transform = src.window_transform(window) if window is not None else src.transform
             self.crs = src.crs
-            self.bounds = rasterio.transform.array_bounds(*self.z.shape, self.transform)  # (bottom, left, top, right)
+            self.bounds = rasterio.transform.array_bounds(*self.z.shape, self.transform)  # (ovest, sud, est, nord)
             self.res = abs(self.transform.a)
         self._inv = ~self.transform
+
+    @classmethod
+    def da_celle(cls, csv_path):
+        """DEM a 100 m costruito da site_cells.csv del gruppo Terreno
+        (quota media di ogni cella). Conserva anche le colonne di pendenza."""
+        d = np.genfromtxt(csv_path, delimiter=",", names=True, dtype=None, encoding="utf-8")
+        x, y = d["x_m"].astype(float), d["y_m"].astype(float)
+        passo = float(np.median(d["width_m"]))
+        x0, y1 = x.min(), y.max()
+        col = np.round((x - x0) / passo).astype(int)
+        row = np.round((y1 - y) / passo).astype(int)
+        z = np.full((row.max() + 1, col.max() + 1), np.nan)
+        z[row, col] = d["elevation_mean_m"].astype(float)
+        tr = rasterio.transform.from_origin(x0 - passo / 2, y1 + passo / 2, passo, passo)
+        dem = cls(z=z, transform=tr, crs=rasterio.crs.CRS.from_proj4(CRS_POLARE))
+        dem.celle = {"x": x, "y": y,
+                     "pendenza_media": d["slope_mean_deg"].astype(float),
+                     "frazione_atterrabile": d["passes_slope_filter_pct"].astype(float)}
+        return dem
 
     def campiona(self, x, y):
         """Quota (m) nei punti x, y (m), interpolazione bilineare; NaN fuori dal DEM."""
@@ -224,12 +263,12 @@ def metriche_celle(oriz, lat, lon, quota, sole, terra, passo_min, blocco=48,
 # --------------------------------------------------------------------------
 # Programma principale
 # --------------------------------------------------------------------------
-def mappa_sito(dem_path, far_path=None, nome=None, passo=500.0, inizio=None,
-               giorni=365, passo_tempo=60, n_az=360, margine_bordo=0.0):
+def mappa_sito(dem_path=None, far_path=None, nome=None, passo=500.0, inizio=None,
+               giorni=365, passo_tempo=60, n_az=360, margine_bordo=0.0,
+               celle_csv=None, punti=None):
     t0 = time.time()
-    with rasterio.open(dem_path) as src:
-        sx0, sy0, sx1, sy1 = src.bounds
-    vicino = DEM(dem_path)
+    vicino = DEM.da_celle(celle_csv) if celle_csv else DEM(dem_path)
+    sx0, sy0, sx1, sy1 = vicino.bounds
     lontano = None
     if far_path:
         m = 205_000.0
@@ -254,6 +293,21 @@ def mappa_sito(dem_path, far_path=None, nome=None, passo=500.0, inizio=None,
     print(f"[{nome}] metriche calcolate, totale {time.time() - t0:.0f} s")
 
     forma = (len(gy), len(gx))
+    extra = {}
+    if vicino.celle is not None:                 # pendenza dal CSV, aggregata sulle celle
+        c = vicino.celle
+        ci = np.floor((c["x"] - (gx[0] - passo / 2)) / passo).astype(int)
+        ri = np.floor(((gy[0] + passo / 2) - c["y"]) / passo).astype(int)
+        ok = (ci >= 0) & (ci < len(gx)) & (ri >= 0) & (ri < len(gy))
+        for chiave, col in (("pendenza_media_deg", "pendenza_media"),
+                            ("area_pendenza_le10_pct", "frazione_atterrabile")):
+            somma, num = np.zeros(forma), np.zeros(forma)
+            np.add.at(somma, (ri[ok], ci[ok]), c[col][ok])
+            np.add.at(num, (ri[ok], ci[ok]), 1)
+            extra[chiave] = np.where(num > 0, somma / np.maximum(num, 1), np.nan).ravel()
+    atterrabile = (extra["area_pendenza_le10_pct"] >= 50) if extra else np.ones(len(xs), bool)
+    migliori = _migliori_celle(ris, atterrabile, xs, ys, lat, lon, quota, extra)
+
     return {
         "formato": "mappa-sito-lunare", "versione": 1,
         "nome": nome or Path(dem_path).stem,
@@ -263,7 +317,9 @@ def mappa_sito(dem_path, far_path=None, nome=None, passo=500.0, inizio=None,
         "periodo": {"inizio": inizio.strftime('%Y-%m-%dT%H:%M:%SZ'), "giorni": giorni,
                     "passo_min": passo_tempo},
         "ipotesi": {"altezza_osservatore_m": 2.0, "n_azimut": n_az,
-                    "dem_vicino": Path(dem_path).name,
+                    "dem_vicino": Path(celle_csv or dem_path).name,
+                    "atterrabile": (f">= 50% dell'area della cella con pendenza <= {PENDENZA_MAX_DEG:.0f} gradi"
+                                    if extra else "non valutato (serve site_cells.csv)"),
                     "dem_lontano": Path(far_path).name if far_path else None,
                     "distanza_vicina_m": 10_000, "distanza_massima_m": 200_000 if far_path else 10_000,
                     "margine_com_deg": MARGINE_COM_DEG,
@@ -275,9 +331,35 @@ def mappa_sito(dem_path, far_path=None, nome=None, passo=500.0, inizio=None,
             "quota_m": np.round(quota.reshape(forma), 1).tolist(),
             "orizzonte_max_deg": np.round(np.nanmax(oriz, axis=1).reshape(forma), 2).tolist(),
             **{k: np.round(v.reshape(forma), 2).tolist() for k, v in ris.items()},
+            **{k: np.round(v.reshape(forma), 2).tolist() for k, v in extra.items()},
         },
+        "migliori_celle": migliori,
+        "punti_segnati": punti or [],
         "_orizzonti": oriz,     # non salvato nel JSON (troppo grande), utile per i controlli
     }
+
+
+def _migliori_celle(ris, atterrabile, xs, ys, lat, lon, quota, extra, n=5, distanza_min=1000.0):
+    """Le n celle atterrabili con piu' ore di luce + comunicazione (poi energia),
+    distanti tra loro almeno distanza_min metri."""
+    chiave = np.where(atterrabile & np.isfinite(ris["luce_e_com_pct"]),
+                      ris["luce_e_com_pct"] + 1e-3 * np.nan_to_num(ris["energia_pct"]), -np.inf)
+    scelte = []
+    for i in np.argsort(-chiave):
+        if not np.isfinite(chiave[i]) or len(scelte) == n:
+            break
+        if all(np.hypot(xs[i] - xs[j], ys[i] - ys[j]) >= distanza_min for j in scelte):
+            scelte.append(i)
+    out = []
+    for i in scelte:
+        r = {"lat": round(float(lat[i]), 5), "lon": round(float(lon[i]), 5),
+             "x_m": float(xs[i]), "y_m": float(ys[i]), "quota_m": round(float(quota[i]), 1)}
+        for k in ("luce_pct", "comunicazione_pct", "luce_e_com_pct", "energia_pct", "buio_max_h", "senza_com_max_h"):
+            r[k] = round(float(ris[k][i]), 1)
+        for k in extra:
+            r[k] = round(float(extra[k][i]), 1)
+        out.append(r)
+    return out
 
 
 def _json_pulito(o):
@@ -309,33 +391,56 @@ def disegna(mappa, file):
     p = g["passo_m"] / 2
     ext = [(g["x_m"][0] - p) / 1000, (g["x_m"][-1] + p) / 1000,
            (g["y_m"][-1] - p) / 1000, (g["y_m"][0] + p) / 1000]
-    pannelli = [("quota_m", "Quota [m]", "gist_earth", None),
-                ("luce_pct", "Luce [% del tempo]", "inferno", (0, 100)),
-                ("comunicazione_pct", "Comunicazione utile [%]", "viridis", (0, 100)),
-                ("luce_e_com_pct", "Luce + comunicazione [%]", "magma", (0, 100)),
-                ("energia_pct", "Energia media [% del massimo]", "YlOrBr_r", (0, 100)),
-                ("buio_max_h", "Buio continuo piu' lungo [ore]", "Blues", None)]
-    fig, axs = plt.subplots(2, 3, figsize=(15, 9.5))
-    for ax, (k, titolo, cmap, lim) in zip(axs.ravel(), pannelli):
-        a = np.array(L[k], dtype=float)
-        im = ax.imshow(a, extent=ext, cmap=cmap, vmin=lim[0] if lim else None,
+    lc = np.array(L["luce_e_com_pct"], dtype=float)
+    if "area_pendenza_le10_pct" in L:
+        lc_att = np.where(np.array(L["area_pendenza_le10_pct"], dtype=float) >= 50, lc, np.nan)
+    else:
+        lc_att = lc
+    pannelli = [("quota_m", None, "Quota [m]", "gist_earth", None),
+                ("pendenza_media_deg", None, "Pendenza media [gradi]", "RdYlGn_r", (0, 25)),
+                ("luce_pct", None, "Luce [% del tempo]", "inferno", (0, 100)),
+                ("comunicazione_pct", None, "Comunicazione utile [%]", "viridis", (0, 100)),
+                ("luce_e_com_pct", None, "Luce + comunicazione [%]", "magma", (0, 100)),
+                ("energia_pct", None, "Energia media [% del massimo]", "YlOrBr_r", (0, 100)),
+                ("buio_max_h", None, "Buio continuo piu' lungo [ore]", "Blues", None),
+                (None, lc_att, "Luce + com. solo dove atterrabile [%]", "magma", (0, 100))]
+    fig, axs = plt.subplots(2, 4, figsize=(20, 9.5))
+    for ax, (k, arr, titolo, cmap, lim) in zip(axs.ravel(), pannelli):
+        if arr is None:
+            if k not in L:
+                ax.axis("off")
+                ax.set_title(titolo + "\n(non disponibile)")
+                continue
+            arr = np.array(L[k], dtype=float)
+        if k is None:
+            ax.set_facecolor("#cfcfcf")
+        im = ax.imshow(arr, extent=ext, cmap=cmap, vmin=lim[0] if lim else None,
                        vmax=lim[1] if lim else None, origin="upper")
         ax.set_title(titolo)
         ax.set_xlabel("x [km]")
         ax.set_ylabel("y [km]")
         fig.colorbar(im, ax=ax, shrink=0.8)
+        if k in ("luce_e_com_pct", None):
+            for n, c in enumerate(mappa.get("migliori_celle", []), 1):
+                ax.plot(c["x_m"] / 1000, c["y_m"] / 1000, "o", ms=11, mfc="none", mec="cyan", mew=2)
+                ax.text(c["x_m"] / 1000, c["y_m"] / 1000, f" {n}", color="cyan", fontsize=10, weight="bold")
+        for pt in mappa.get("punti_segnati", []):
+            ax.plot(pt["x_m"] / 1000, pt["y_m"] / 1000, "*", ms=14, mfc="white", mec="black")
+            ax.text(pt["x_m"] / 1000, pt["y_m"] / 1000, " " + pt["nome"], color="white", fontsize=8,
+                    weight="bold", va="bottom")
     per = mappa["periodo"]
-    fig.suptitle(f"{mappa['nome']} - {per['inizio'][:10]} + {per['giorni']} giorni "
-                 f"(celle {g['passo_m']:.0f} m, terreno fino a {mappa['ipotesi']['distanza_massima_m'] / 1000:.0f} km)")
+    fig.suptitle(f"{mappa['nome']} - {per['inizio'][:10]} + {per['giorni']:g} giorni "
+                 f"(celle {g['passo_m']:.0f} m, terreno fino a {mappa['ipotesi']['distanza_massima_m'] / 1000:.0f} km)"
+                 f" - cerchi azzurri: 5 migliori celle atterrabili, stelle: punti di riferimento")
     fig.tight_layout()
-    fig.savefig(file, dpi=110)
+    fig.savefig(file, dpi=100)
     plt.close(fig)
 
 
-def confronta_con_terreno(mappa, horizon_json, dem_path, far_path):
+def confronta_con_terreno(mappa, horizon_json, dem_path, far_path, celle_csv=None):
     """Calcola l'orizzonte nel punto del file del gruppo Terreno e lo confronta."""
     h = json.loads(Path(horizon_json).read_text(encoding="utf-8"))
-    vicino = DEM(dem_path)
+    vicino = DEM.da_celle(celle_csv) if celle_csv else DEM(dem_path)
     t = Transformer.from_crs(LUNA_LONLAT, vicino.crs, always_xy=True)
     x, y = t.transform(h["lon"], h["lat"])
     lontano = None
@@ -351,7 +456,8 @@ def confronta_con_terreno(mappa, horizon_json, dem_path, far_path):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Mappa luce/comunicazione su un'area lunare")
-    ap.add_argument("--dem", required=True, help="DEM del sito (es. *_surf.tif, 5 m/pixel)")
+    ap.add_argument("--dem", help="DEM del sito (es. *_surf.tif, 5 m/pixel)")
+    ap.add_argument("--celle", help="site_cells.csv del gruppo Terreno (alternativa a --dem)")
     ap.add_argument("--far", help="DEM regionale per il terreno lontano (es. LDEM_60S_240MPP_ADJ.TIF)")
     ap.add_argument("--nome", help="nome del sito")
     ap.add_argument("--passo", type=float, default=500.0, help="distanza tra le celle in metri")
@@ -360,10 +466,29 @@ if __name__ == "__main__":
     ap.add_argument("--passo-tempo", type=float, default=60, help="minuti tra due istanti")
     ap.add_argument("--uscita", default="output/mappe")
     ap.add_argument("--confronta", help="horizon.json del gruppo Terreno da confrontare")
+    ap.add_argument("--segna", action="append", default=[],
+                    help='punto da evidenziare: "lat,lon,nome" (ripetibile)')
     a = ap.parse_args()
+    if not (a.dem or a.celle):
+        ap.error("serve --dem oppure --celle")
+
+    a_xy = Transformer.from_crs(LUNA_LONLAT, CRS_POLARE, always_xy=True)
+    punti = []
+    for s_ in a.segna:
+        la, lo, *nome = s_.split(",")
+        x, y = a_xy.transform(float(lo), float(la))
+        punti.append({"lat": float(la), "lon": float(lo), "nome": ",".join(nome).strip() or "punto",
+                      "x_m": float(x), "y_m": float(y)})
 
     inizio = datetime.strptime(a.inizio, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    m = mappa_sito(a.dem, a.far, a.nome, a.passo, inizio, a.giorni, a.passo_tempo)
+    m = mappa_sito(a.dem, a.far, a.nome, a.passo, inizio, a.giorni, a.passo_tempo,
+                   celle_csv=a.celle, punti=punti)
     print("Salvato:", salva(m, a.uscita))
+    print("Migliori celle atterrabili (luce + comunicazione):")
+    for n, c in enumerate(m["migliori_celle"], 1):
+        print(f"  {n}. lat {c['lat']:.5f} lon {c['lon']:.5f} quota {c['quota_m']:.0f} m | "
+              f"luce {c['luce_pct']}% com {c['comunicazione_pct']}% L+C {c['luce_e_com_pct']}% "
+              f"energia {c['energia_pct']}% buio max {c['buio_max_h']:.0f} h"
+              + (f" | pendenza {c['pendenza_media_deg']} gradi" if "pendenza_media_deg" in c else ""))
     if a.confronta:
-        confronta_con_terreno(m, a.confronta, a.dem, a.far)
+        confronta_con_terreno(m, a.confronta, a.dem, a.far, a.celle)
