@@ -2,3 +2,5 @@
 dati_dem/
 __pycache__/
 *.pyc
+*.tif
+*.tiff
