@@ -41,7 +41,7 @@ from pathlib import Path
 import numpy as np
 from skyfield.api import Loader, PlanetaryConstants
 
-# I file delle effemeridi vengono salvati in 1-Ephemerids/dati_effemeridi
+# I file delle effemeridi vengono salvati in dati_effemeridi/
 # (sono esclusi da Git tramite .gitignore e si riscaricano da soli).
 _CARTELLA_DATI = Path(__file__).resolve().parent / "dati_effemeridi"
 _CARTELLA_DATI.mkdir(exist_ok=True)
@@ -320,7 +320,7 @@ def valuta_sito(lat, lon, inizio, giorni=30, passo_min=10, orizzonte=None,
             "degrado_polvere_annuo_pct": degrado_polvere_annuo_pct,
             "soglia_sole_radente_deg": soglia_sole_radente_deg,
             "pannello": "punta sempre il Sole; potenza proporzionale alla frazione di disco visibile",
-            "fonti": "1-Ephemerids/FONTI.txt",
+            "fonti": "FONTI.txt",
         },
         "metriche": metriche,
         "eventi": [{"tipo": e['tipo'], "tempo": _iso(e['tempo'])} for e in eventi],

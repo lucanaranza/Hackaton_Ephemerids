@@ -1,4 +1,4 @@
-FONTI E IPOTESI DEL MODULO EFFEMERIDI (1-Ephemerids)
+FONTI E IPOTESI DEL MODULO EFFEMERIDI (repository Hackaton_Ephemerids)
 =====================================================
 Team NASA Space Apps 2026 - Lunar Landing Site Navigator
 Ogni valore numerico usato in effemeridi.py e' elencato qui, con la sua fonte
@@ -45,7 +45,7 @@ oppure con l'indicazione esplicita che si tratta di un'IPOTESI del team.
   IAU 2015 Resolution B3 (Prsa et al. 2016, AJ 152, 41).
   Usato per il raggio apparente del Sole (~0.27 gradi) visto dalla Luna.
 
-- Raggio lunare medio: 1 737 400 m (IAU/WGCCRE; usato anche in 2-Topography).
+- Raggio lunare medio: 1 737 400 m (IAU/WGCCRE; usato anche in gruppo Terreno).
 
 
 4. POTENZA: FRAZIONE DEL DISCO SOLARE VISIBILE
@@ -125,7 +125,7 @@ oppure con l'indicazione esplicita che si tratta di un'IPOTESI del team.
   il flag "buio_tocca_bordo_periodo" segnala che la durata reale puo' essere maggiore.
 
 
-9. DATI DEL TERRENO (forniti da 2-Topography)
+9. DATI DEL TERRENO (forniti da gruppo Terreno)
 ---------------------------------------------
 - DEM LOLA 5 m/pixel dei siti del polo sud, NASA GSFC PGDA:
   Barker, M. K. et al. (2021), "Improved LOLA elevation maps for south pole

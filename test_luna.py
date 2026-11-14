@@ -6,7 +6,7 @@ Valori di riferimento NASA (Apollo Lunar Surface Journal, vedi FONTI.txt):
     Terra elevazione 59.4-59.7 (scritto "59:43" in tabella), azimut 272.16 gradi
 Il nostro calcolo da' Sole 10.7 / 88.8 e Terra 59.2 / 272.2 (differenze entro ~0.5 gradi,
 compatibili con quelle dichiarate dall'ALSJ tra effemeridi diverse).
-I file delle effemeridi vengono letti/scaricati in 1-Ephemerids/dati_effemeridi.
+I file delle effemeridi vengono letti/scaricati in dati_effemeridi/.
 """
 from pathlib import Path
 
